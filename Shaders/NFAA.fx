@@ -43,6 +43,7 @@
  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define BUFFER_PIXEL_SIZE float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT)
+#define BUFFER_SCREEN_SIZE float2(BUFFER_WIDTH, BUFFER_HEIGHT)
 #define BUFFER_ASPECT_RATIO (BUFFER_WIDTH * BUFFER_RCP_HEIGHT)
 
 uniform int EdgeDetectionType <
@@ -57,7 +58,7 @@ uniform float EdgeDetectionThreshold <
     ui_tooltip = "The difference in Luminence/Color that would be perceived as an edge.\n" 
                  "Try lowering this slightly if the Edge Mask misses some edges.\n"
                  "Default is 0.063";
-    ui_min = 0.050; ui_max = 0.200; ui_step = 0.001;
+    ui_min = 0.050; ui_max = 0.500; ui_step = 0.001;
 > = 0.100;
 
 uniform float EdgeSearchRadius <
@@ -72,11 +73,11 @@ uniform float EdgeSearchRadius <
 uniform float UnblurFilterStrength <
 	ui_type = "drag";
     ui_label = "Unblur Filter Strength";
-    ui_tooltip = "Adjusts the Edge Mask and Corner Mask contrast for filtering unwanted edge blur.\n"
+    ui_tooltip = "Adjusts the Edge Mask and Corner Mask contrast for filtering unwanted textures, icons, and text blur.\n"
                  "Try raising this if text or icons become blurry.\n"
                  "Try lowering this if edges are still too aliased.\n"
                  "Default is 1.000";
-    ui_min = 0.000; ui_max = 2.000; ui_step = 0.001;
+    ui_min = 0.100; ui_max = 10.000; ui_step = 0.001;
 > = 1.000;
 
 uniform float BlurStrength <
@@ -146,7 +147,7 @@ float2 Rotate45(float2 p) {
 
 float4 NFAA(float2 texcoord, float4 offsets[4])
 {
-    float4 color = tex2Dlod(BackBuffer, float4(texcoord, 0.0, 0.0));
+    float4 color = tex2Dfetch(BackBuffer, floor(texcoord * BUFFER_SCREEN_SIZE), 0);
 
     // Find Edges
     //  +---+---+---+---+---+
@@ -187,21 +188,25 @@ float4 NFAA(float2 texcoord, float4 offsets[4])
 
     // i.e. top vs bottom = a + b - (c + d) = (e + 2*f + g) / 4 - (j + 2*k + l) / 4
     float2 normal = float2(LinearDifference(b + d, a + c), LinearDifference(c + d, a + b)); // right - left, bottom - top
-    float edge = length(normal);
+    float edge = saturate(length(normal)); // clamp to 1 instead of sqrt(2)
 
     float edgeMask = 1.0;
     float cornerMask = 1.0;
-    if (edge > EdgeDetectionThreshold)
+    
+    // S-curve: x^b / (x^b + (1 - x)^b) | b = 3 | x = edge / EdgeDetectionThreshold / 2.0
+    float x = saturate(0.5 * edge / EdgeDetectionThreshold);
+    float edgeConfidence = x*x*x / (3.0*x*x - 3.0*x + 1);
+    if (edgeConfidence > 0.10)
     {
         // Lets make that edgeMask for a sharper image.
-        float edgeConfidence = log2(edge / EdgeDetectionThreshold);
-        edgeMask = saturate(mad(edgeConfidence, UnblurFilterStrength - 2.0, 1.0));
-        // edgeMask = saturate((1.0 - (UnblurFilterStrength - 2.0) * edgeConfidence);
+        edgeMask = saturate(1.0 - edgeConfidence / UnblurFilterStrength);
 
         // Then subtract corners from edge mask to avoid bluring text and detailed icons
-        float4 corners = float4(LinearDifference(a + b + c, 3.0 * d), LinearDifference(a + b + d, 3.0 * c), LinearDifference(a + c + d, 3.0 * b), LinearDifference(c + d + b, 3.0 * a));
-        float corner = dot(abs(corners), 0.25);
-        cornerMask = saturate(edgeMask + corner);
+        float2 corners = abs(float2(LinearDifference(a, d), LinearDifference(b, c)));
+        float corner = abs(corners.x - corners.y);
+        x = saturate(0.5 * corner / EdgeDetectionThreshold);
+        float cornerConfidence = x*x*x / (3.0*x*x - 3.0*x + 1);
+        cornerMask = saturate(1.0 + (-edgeConfidence + cornerConfidence) / UnblurFilterStrength);
 
         // calculate x/y coordinates along the edge at specified distances and offsets
         // +---+---+---+---+---+ +---+---+---+---+---+
